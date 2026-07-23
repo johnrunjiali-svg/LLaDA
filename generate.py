@@ -13,7 +13,7 @@ def add_gumbel_noise(logits, temperature):
     '''
     if temperature == 0:
         return logits
-    logits = logits.to(torch.float64)
+    logits = logits.to(torch.float64) # very pricise and costy float representation
     noise = torch.rand_like(logits, dtype=torch.float64)
     gumbel_noise = (- torch.log(noise)) ** temperature
     return logits.exp() / gumbel_noise
@@ -116,18 +116,18 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
     if 'illada' in model_name.lower():
         assert prompt.shape[0] == 1, 'iLLaDA currently does not support padded batch generation.'
 
-    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
-    x[:, :prompt.shape[1]] = prompt.clone()
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device) # x is full of mask_id, of shape B, L_prompt + L_gen
+    x[:, :prompt.shape[1]] = prompt.clone() # the left B * L_prompt block is prompt...
 
     if attention_mask is not None:
-        attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
+        attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1) # extend attention map to match shape
 
-    prompt_index = (x != mask_id)
+    prompt_index = (x != mask_id) # a array consist of True and False, indicating where prompts lives
 
     assert gen_length % block_length == 0
-    num_blocks = gen_length // block_length
+    num_blocks = gen_length // block_length # if block_length = gen_length, then only one block. 
 
-    assert steps % num_blocks == 0
+    assert steps % num_blocks == 0 # assign total steps to each block evenly
     steps = steps // num_blocks
 
     if end_think_context_start is None:
@@ -136,26 +136,29 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
         end_think_total_gen_length = gen_length
 
     for num_block in range(num_blocks):
+        # of shape B, block_length, True or False
         block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length:] == mask_id)
+        # of shape (B, steps), each is the schedule for num of tokens to be unmaksed in that step
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         for i in range(steps):
-            mask_index = (x == mask_id)
+            mask_index = (x == mask_id) # where are still maksed
             block_start = prompt.shape[1] + num_block * block_length
             block_end = prompt.shape[1] + (num_block + 1) * block_length
             candidate_mask_index = mask_index.clone()
-            candidate_mask_index[:, :block_start] = False
-            candidate_mask_index[:, block_end:] = False
-            if cfg_scale > 0.:
+            candidate_mask_index[:, :block_start] = False # set before block to false, we only cares about current block
+            candidate_mask_index[:, block_end:] = False # set after block to false, same reason
+            if cfg_scale > 0.: # classifier free guidance
                 un_x = x.clone()
-                un_x[prompt_index] = mask_id
-                x_ = torch.cat([x, un_x], dim=0)
+                un_x[prompt_index] = mask_id # this is the unconditional generation
+                x_ = torch.cat([x, un_x], dim=0) # shape[0] = 2B
                 if attention_mask is not None:
                     attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
                 logits = model(x_, attention_mask=attention_mask_).logits
-                logits, un_logits = torch.chunk(logits, 2, dim=0)
-                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+                logits, un_logits = torch.chunk(logits, 2, dim=0) # chunk in half at first dim
+                logits = un_logits + (cfg_scale + 1) * (logits - un_logits) # CFG increases prompt-matching
+                # Maybe we can use CFG at different position 
             else:
-                logits = model(x, attention_mask=attention_mask).logits
+                logits = model(x, attention_mask=attention_mask).logits # of shape (B, L, V)
 
             logits = apply_end_think_logit_boost(
                 logits,
@@ -169,31 +172,35 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
             )
 
             if logits_eos_inf:
-                logits[:, :, 126081] = -torch.inf
+                logits[:, :, 126081] = -torch.inf # set to -inf in logits, this will cause the eos token never be selected
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+            x0 = torch.argmax(logits_with_noise, dim=-1) # (B, L), each element of x0 is an index in 0 to V-1, that is the token being selected
             
             if confidence_eos_eot_inf:
-                logits_with_noise[:, :, 126081] = logits[:, :, 126348] = -torch.inf
+                logits_with_noise[:, :, 126081] = logits[:, :, 126348] = -torch.inf # has a bug in this line, should use logits instead of with noise
+                # set confidence of eos and eot to zero, note that this happens after the token being chosen
 
             if remasking == 'low_confidence':
-                p = F.softmax(logits, dim=-1)
+                p = F.softmax(logits, dim=-1) # (B, L, V), each position confidence of that token
+                # torch.squeeze removes dimension whose size is 1
+                # torch.unsqueeze add one dimension, here index is of shape (B, L, 1)
+                # torch.gather selects values from a tensor according to an index tensor
                 x0_p = torch.squeeze(
-                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l. this is the confidence of selected token
             elif remasking == 'random':
                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
             else:
                 raise NotImplementedError(remasking)
 
-            x0_p[:, prompt.shape[1] + (num_block + 1) * block_length:] = -np.inf
+            x0_p[:, prompt.shape[1] + (num_block + 1) * block_length:] = -np.inf # set confidence after current block to -inf, so they won't be kept
 
-            x0 = torch.where(mask_index, x0, x)
-            confidence = torch.where(mask_index, x0_p, -np.inf)
+            x0 = torch.where(mask_index, x0, x) # replace all not maksed position with value from x, i.e. replace places in x that are masked with value form x0
+            confidence = torch.where(mask_index, x0_p, -np.inf) 
 
             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
             for j in range(confidence.shape[0]):
-                _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
+                _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i]) # the discard is values, we only need index
                 transfer_index[j, select_index] = True
             x[transfer_index] = x0[transfer_index]
 
