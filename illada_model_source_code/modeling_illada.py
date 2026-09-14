@@ -35,14 +35,14 @@ logger = logging.get_logger(__name__)
 class ILLaDARMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size)) # trainable parameters, start all one
+        self.variance_epsilon = eps # add to dominator to avoid numerical problems
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True) # last dim is our x
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon) # avoid dividing
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
@@ -106,7 +106,7 @@ class ILLaDAMLP(nn.Module):
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape # (B, n_heads, sequence, head_dim)
     if n_rep == 1:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
