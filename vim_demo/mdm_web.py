@@ -33,6 +33,7 @@ COMMANDS = {'auto', 'finish', 'undo', 'reset', 'len', 'topk', 'view'}
 def state(sess):
     """Everything the page draws."""
     order = sess.order()
+    special = set(getattr(sess.tokenizer, 'all_special_ids', ()))
     slots = []
     for i, s in enumerate(sess.slots):
         ids, ps = sess.dist(i)
@@ -43,6 +44,7 @@ def state(sess):
         })
     return {
         'title': sess.title, 'prompt': sess.prompt, 'prompt_tokens': len(sess.prompt_ids),
+        'prompt_pieces': [{'id': t, 'text': sess.piece(t), 'special': t in special} for t in sess.prompt_ids],
         'answer': ''.join(sess.answer_pieces()), 'slots': slots, 'step': sess.step, 'view': sess.view,
         'topk': sess.topk, 'notes': sess.notes, 'fwd_secs': sess.fwd_secs, 'can_undo': bool(sess.history),
         'mask_id': sess.mask_id, 'vocab': sess.probs.shape[-1],

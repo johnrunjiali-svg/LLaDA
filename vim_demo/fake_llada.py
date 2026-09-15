@@ -27,6 +27,7 @@ PIECE = re.compile(r'<\|[a-z_]+\|>| ?[A-Za-z]+| ?[0-9]| ?[^\sA-Za-z0-9]|\s')
 
 class FakeTokenizer:
     bos_token_id, eos_token_id, mask_token_id = 0, 2, 5
+    all_special_ids = list(range(len(SPECIALS)))
 
     def __init__(self, capacity=4096):
         self.capacity = capacity
@@ -50,7 +51,7 @@ class FakeTokenizer:
     def encode(self, text, add_special_tokens=False):
         ids = [self.bos_token_id] if add_special_tokens else []
         for w in PIECE.findall(text):
-            subwords = [w] if len(w) <= 7 else [w[:5]] + [w[j:j + 4] for j in range(5, len(w), 4)]
+            subwords = [w] if len(w) <= 7 or w.startswith('<|') else [w[:5]] + [w[j:j + 4] for j in range(5, len(w), 4)]
             ids += [self._id(s) for s in subwords]
         return ids
 
