@@ -216,6 +216,10 @@ class Session:
         self.step += 1
         self.dirty = True
 
+    def order(self):
+        """{masked position: rank}, 1 = the one low-confidence sampling unmasks first."""
+        return {i: r + 1 for r, i in enumerate(sorted(self.masked(), key=lambda i: -self.top_p[i][0]))}
+
     def frozen(self, i):
         s = self.slots[i]
         return s.tok != self.mask_id and s.top is not None and self.view == 'frozen'
@@ -281,9 +285,13 @@ class Session:
         state, so a save made before the editor reloaded the previous result does not undo that result."""
         page = parse(text)
         base = parse(self.renders.get(page.rev) or self.render())
+        self.run(lambda: self.apply(page, base))
+
+    def run(self, change):
+        """Run change() -> notes as one all-or-nothing update, then refresh the forward pass."""
         backup = {**self.__dict__, 'slots': list(self.slots), 'history': list(self.history)}
         try:
-            self.notes = self.apply(page, base)
+            self.notes = change() or ['no edits']
             self.refresh()
         except Exception:
             self.__dict__.update(backup)
@@ -292,20 +300,28 @@ class Session:
     def apply(self, f, base):
         notes = list(f.problems)
         cmd, *args = f.cmd.split() or ['']
-        if cmd == 'undo':
-            if not self.history:
-                return notes + ['nothing to undo']
-            self.prompt, self.prompt_ids, self.slots, self.step = self.history.pop()
-            self.dirty = True
-            return notes + [f'undo → back to step {self.step}']
-
+        if cmd == 'undo':  # drops the rest of this save
+            return notes + self.command(cmd, args)
         edits = self.cell_edits(f, base, notes)
-        resized = None
+        answer = None
         if f.answer is not None and f.answer != base.answer:
-            head, tail, ids = self.retokenize(f.answer)
             if base.answer != ''.join(self.answer_pieces()):
                 notes.append('ANSWER ignored: it was edited on an outdated render, redo it')
-            elif len(ids) == tail - head:
+            else:
+                answer = f.answer
+        prompt = f.prompt if f.prompt not in (None, base.prompt) else None
+        notes += self.edit(edits, answer, prompt)
+        if cmd:
+            notes += self.command(cmd, args)
+        return notes
+
+    def edit(self, edits, answer=None, prompt=None):
+        """One step of user edits: {position: (token id, how)}, an edited answer line, a new prompt."""
+        notes, resized = [], None
+        edits = {i: e for i, e in edits.items() if e[0] != self.slots[i].tok}
+        if answer is not None and answer != ''.join(self.answer_pieces()):
+            head, tail, ids = self.retokenize(answer)
+            if len(ids) == tail - head:
                 text_edits = {head + j: (t, 'text') for j, t in enumerate(ids) if t != self.slots[head + j].tok}
                 if clash := sorted(i for i in text_edits if i in edits and edits[i][0] != text_edits[i][0]):
                     notes.append(f'ANSWER ignored at pos {clash}: id/pick edits win')
@@ -315,11 +331,11 @@ class Session:
             else:
                 resized = head, tail, ids
 
-        new_prompt = f.prompt not in (None, base.prompt, self.prompt)
+        new_prompt = prompt not in (None, self.prompt)
         if edits or resized or new_prompt:
             self.begin_step()
             if new_prompt:
-                self.set_prompt(f.prompt)
+                self.set_prompt(prompt)
                 notes.append('prompt changed')
             if resized:
                 head, tail, ids = resized
@@ -327,9 +343,7 @@ class Session:
                 self.slots[head:tail] = [Slot(t) if t == self.mask_id else Slot(t, self.step, 'text') for t in ids]
                 notes.append(f'ANSWER retokenized, length {old_len} → {len(self.slots)}')
             notes += [self.commit(i, tok, how) for i, (tok, how) in sorted(edits.items())]
-        if cmd:
-            notes += self.command(cmd, args)
-        return notes or ['no edits']
+        return notes
 
     def cell_edits(self, f, base, notes):
         """{position: (token id, how)} from the id and pick rows; pick wins if both are set."""
@@ -364,6 +378,12 @@ class Session:
         n = int(args[0]) if args and IS_INT(args[0]) else None
         if cmd == 'auto':
             return self.auto(n or 1)
+        if cmd == 'undo':
+            if not self.history:
+                return ['nothing to undo']
+            self.prompt, self.prompt_ids, self.slots, self.step = self.history.pop()
+            self.dirty = True
+            return [f'undo → back to step {self.step}']
         if cmd == 'finish':
             steps = 0
             while self.masked() and steps <= len(self.slots):
@@ -414,7 +434,7 @@ class Session:
             f'last     > {" · ".join(self.notes)}',
             '',
         ]
-        order = {i: r + 1 for r, i in enumerate(sorted(self.masked(), key=lambda i: -self.top_p[i][0]))}
+        order = self.order()
 
         def row(label, cells):
             return fit(label, LABEL_W) + '│' + '│'.join(f' {fit(c, W)} ' for c in cells) + '│'
@@ -506,22 +526,20 @@ def serve(model, tokenizer, path='mdm.txt', poll=0.2, **session_kwargs):
     return sess
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def add_model_args(ap):
     ap.add_argument('--model', default='GSAI-ML/iLLaDA-8B-Instruct')
     ap.add_argument('--fake', action='store_true', help='fake tokenizer and fake model: no weights, no download')
     ap.add_argument('--fake-model', action='store_true', help='real tokenizer from --model, fake model')
-    ap.add_argument('--file', default='mdm.txt')
     ap.add_argument('--prompt', default='What is the capital of France?')
     ap.add_argument('--gen-len', type=int, default=16)
     ap.add_argument('--mask-id', type=int, default=5, help='iLLaDA: 5, LLaDA: 126336')
     ap.add_argument('--topk', type=int, default=5)
-    ap.add_argument('--wrap', type=int, default=6, help='positions per table block, 0 = one wide table')
-    ap.add_argument('--col-width', type=int, default=20)
     ap.add_argument('--no-chat', action='store_true', help='feed the prompt as raw text, without the chat template')
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    args = ap.parse_args()
 
+
+def load(args):
+    """(model, tokenizer, title) as selected by add_model_args()."""
     if args.fake:
         from fake_llada import FakeTokenizer
         tokenizer = FakeTokenizer()
@@ -536,7 +554,17 @@ def main():
         model = AutoModel.from_pretrained(args.model, trust_remote_code=True, torch_dtype=torch.bfloat16)
         model, title = model.to(args.device).eval(), f'{args.model} · mask id {args.mask_id}'
     print(f'mask id {args.mask_id} decodes to {tokenizer.decode([args.mask_id])!r}')
+    return model, tokenizer, title
 
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_model_args(ap)
+    ap.add_argument('--file', default='mdm.txt')
+    ap.add_argument('--wrap', type=int, default=6, help='positions per table block, 0 = one wide table')
+    ap.add_argument('--col-width', type=int, default=20)
+    args = ap.parse_args()
+    model, tokenizer, title = load(args)
     serve(model, tokenizer, args.file, prompt=args.prompt, gen_len=args.gen_len, mask_id=args.mask_id,
           topk=args.topk, wrap=args.wrap, col_width=args.col_width, chat=not args.no_chat, title=title)
 

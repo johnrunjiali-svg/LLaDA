@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Masked diffusion playground</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f3f3f0;
+  --panel: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #8a8984;
+  --line: #e2e1dc;
+  --bar: #2a78d6;          /* probability marks: one blue ramp */
+  --track: #cde2fb;        /* lighter step of the same ramp */
+  --staged: #e0a000;
+  --staged-wash: #fdf3dc;
+  --done: #0ca30c;
+  --critical: #d03b3b;
+  --flash: #fff1b8;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #121211;
+    --panel: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #8d8c85;
+    --line: #2f2f2c;
+    --bar: #3987e5;
+    --track: #0d366b;
+    --staged: #fab219;
+    --staged-wash: #372c10;
+    --flash: #3b3414;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 var(--sans); }
+body.busy { cursor: progress; }
+.wrap { max-width: 1680px; margin: 0 auto; padding: 14px 20px 40px; }
+
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+h1 { font-size: 17px; font-weight: 650; margin: 0; }
+#title { font: 12px var(--mono); color: var(--ink-2); }
+#stats { margin-left: auto; color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.io { margin-top: 12px; padding: 12px 14px; display: grid; gap: 10px;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.field { display: grid; gap: 4px; }
+.field > span { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.field small { font-weight: 400; color: var(--muted); }
+textarea, input { font: 13px/1.4 var(--mono); color: var(--ink); background: var(--bg);
+                  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; }
+textarea { resize: vertical; }
+textarea:focus, input:focus { outline: 2px solid var(--bar); outline-offset: -1px; }
+
+.strip { display: flex; flex-wrap: wrap; gap: 3px; }
+.chip { font: 15px/1.3 var(--mono); white-space: pre; color: var(--ink); background: var(--bg);
+        border: 1px solid transparent; border-radius: 4px; padding: 2px 3px; cursor: pointer; }
+.chip.masked { color: var(--muted); }
+.chip.staged { background: var(--staged-wash); border-color: var(--staged); }
+.chip.sel { outline: 2px solid var(--bar); outline-offset: -1px; }
+
+.toolbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; margin-top: 10px; padding: 8px 0;
+           display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+           background: var(--bg); border-bottom: 1px solid var(--line); }
+.toolbar label { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); font-size: 13px; }
+.toolbar input[type=number] { width: 4.4em; padding: 4px 6px; }
+.sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+button { font: 13px var(--sans); color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+         border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--bar); border-color: var(--bar); color: #fff; font-weight: 600; }
+kbd { font: 11px var(--mono); margin-left: 5px; padding: 0 4px; border: 1px solid currentColor; border-radius: 3px; opacity: .6; }
+#nstaged { font-weight: 400; margin-left: 4px; }
+
+#notes { font: 12px/1.5 var(--mono); color: var(--ink-2); padding: 8px 2px; min-height: 2.2em; }
+#notes.err { color: var(--ink); }
+#notes.err::before { content: "⚠ error  "; color: var(--critical); font-weight: 700; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+.card { display: grid; gap: 6px; align-content: start; padding: 8px 10px 10px;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.card.selected { outline: 2px solid var(--bar); outline-offset: 1px; }
+.card.staged { border-color: var(--staged); box-shadow: inset 3px 0 0 var(--staged); }
+.card.fresh, .chip.fresh { animation: fresh 1.8s ease-out; }
+@keyframes fresh { from { background: var(--flash); } }
+
+.head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--ink-2); }
+.pos { font: 600 11px var(--mono); color: var(--muted); }
+.badge { white-space: nowrap; }
+.badge:last-child { margin-left: auto; }
+.ok { color: var(--done); font-weight: 700; }
+.pen { color: var(--staged); font-weight: 700; }
+
+.tok { display: flex; align-items: baseline; gap: 8px; font: 600 19px/1.3 var(--mono); min-height: 1.4em; overflow: hidden; }
+.tt { white-space: pre; }
+.ws { color: var(--muted); font-weight: 400; }
+.maskt { color: var(--muted); font-weight: 400; }
+.tid, .cid { font: 11px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.next { display: flex; align-items: baseline; gap: 6px; font: 13px var(--mono); padding-left: 6px; border-left: 3px solid var(--staged); }
+
+.meter { display: grid; grid-template-columns: auto 1fr 2.4em; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2); }
+.meter .val { text-align: right; font: 12px var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; }
+.track { height: 6px; background: var(--track); border-radius: 0 3px 3px 0; }
+.fill { height: 100%; background: var(--bar); border-radius: 0 3px 3px 0; max-width: 100%; }
+
+.cands { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.cand { position: relative; width: 100%; display: grid; grid-template-columns: 1.2em minmax(0, 1fr) auto 2.3em;
+        align-items: baseline; gap: 6px; padding: 3px 4px 7px; text-align: left;
+        font: 13px var(--mono); background: transparent; border: 1px solid transparent; border-radius: 5px; }
+.cand:hover:not(:disabled) { background: var(--bg); border-color: var(--line); }
+.cand .rank { font-size: 11px; color: var(--muted); }
+.cand .tt { overflow: hidden; text-overflow: ellipsis; }
+.cand .cp { text-align: right; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.cand .cbar { position: absolute; left: 4px; bottom: 2px; height: 3px; background: var(--bar); border-radius: 0 2px 2px 0; }
+.cand.cur { font-weight: 700; }
+.cand.cur .rank::after { content: "▸"; color: var(--ink); }
+.cand.stg { background: var(--staged-wash); border-color: var(--staged); }
+
+.foot { display: flex; gap: 6px; }
+.foot input { flex: 1; width: 0; padding: 4px 6px; font-size: 12px; }
+.foot button { padding: 3px 8px; font-size: 12px; white-space: nowrap; }
+
+footer { margin-top: 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+footer kbd { margin: 0 2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Masked diffusion playground</h1>
+    <span id="title"></span>
+    <span id="stats">connecting…</span>
+  </header>
+
+  <section class="io">
+    <label class="field"><span>Prompt <small>⌘/Ctrl ↵ applies</small></span>
+      <textarea id="prompt" rows="2" spellcheck="false"></textarea></label>
+    <div class="field"><span>Answer <small>click a token to jump to its card</small></span>
+      <div class="strip" id="strip"></div></div>
+    <label class="field"><span>Answer as text <small>edit freely · [M] = mask · \n = newline · ↵ applies</small></span>
+      <input id="answer" spellcheck="false" autocomplete="off"></label>
+  </section>
+
+  <nav class="toolbar">
+    <button id="apply" class="primary">Apply step<kbd>↵</kbd><span id="nstaged"></span></button>
+    <button id="clear">Clear<kbd>esc</kbd></button>
+    <span class="sep"></span>
+    <button id="auto">Auto step<kbd>a</kbd></button>
+    <button id="play"></button>
+    <label>tokens / step <input id="k" type="number" min="1" value="1"></label>
+    <span class="sep"></span>
+    <button id="undo">Undo<kbd>u</kbd></button>
+    <button id="reset">Reset</button>
+    <span class="sep"></span>
+    <label>length <input id="len" type="number" min="1"></label>
+    <label>top-k <input id="topk" type="number" min="1" max="50"></label>
+    <label title="committed positions: show the distribution from when they were committed, or the current forward pass">
+      <input id="live" type="checkbox"> live view</label>
+  </nav>
+
+  <div id="notes"></div>
+  <main class="grid" id="grid"></main>
+
+  <footer>
+    Click a candidate (or press its number) to stage it; stage as many positions as you like, then apply them as one step.
+    <br><kbd>←</kbd><kbd>→</kbd> select position · <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> stage candidate · <kbd>x</kbd> stage re-mask ·
+    <kbd>↵</kbd> apply · <kbd>esc</kbd> clear · <kbd>a</kbd> auto step · <kbd>p</kbd> play / pause · <kbd>u</kbd> undo
+    <br>order = which mask low-confidence sampling unmasks next · conf = p(top-1) for a mask, p(token) when it was committed · ▸ current token
+  </footer>
+</div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+const VISIBLE = {' ': '␣', '\n': '↵', '\t': '⇥', '\r': '␍'};
+
+let S = null;               // last state from the server
+let staged = new Map();     // position -> {id, how, text}
+let selected = 0;
+let busy = false, playing = false;
+let freshStep = null;       // step whose new tokens flash on the next render
+let answerBase = null;      // the server's answer the text box was filled from
+
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+
+function tokenSpan(text) {  // token text with whitespace made visible (textContent only: never HTML)
+  const el = h('span', {class: 'tt'});
+  if (!text) return el.append(h('span', {class: 'ws'}, '∅')), el;
+  let buf = '';
+  for (const ch of text) {
+    if (!VISIBLE[ch]) { buf += ch; continue; }
+    if (buf) el.append(buf), buf = '';
+    el.append(h('span', {class: 'ws'}, VISIBLE[ch]));
+  }
+  if (buf) el.append(buf);
+  return el;
+}
+
+const fmtP = p => p == null ? '?' : p >= 0.995 ? '1.0' : p.toFixed(2).slice(1);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const k = () => Math.max(1, parseInt($('#k').value) || 1);
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {});
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+
+// ---- talking to the server
+
+async function send(body, opts) {
+  if (busy) return;
+  busy = true;
+  document.body.classList.add('busy');
+  sync();
+  try {
+    setState(await api('/api/act', body), opts);
+  } catch (e) {
+    playing = false;
+    showNotes([`${e.message}: is the server still running, and the SSH tunnel still open?`], true);
+  } finally {
+    busy = false;
+    document.body.classList.remove('busy');
+    sync();
+  }
+}
+
+const command = (op, ...args) => send({op, args}, {clear: !['topk', 'view'].includes(op), keepText: true});
+
+function applyStep() {
+  if (!S || $('#apply').disabled) return;
+  const body = {op: 'step', edits: [...staged].map(([pos, e]) => ({pos, id: e.id, how: e.how}))};
+  if ($('#answer').value !== answerBase) Object.assign(body, {answer: $('#answer').value, answer_base: answerBase});
+  if ($('#prompt').value !== S.prompt) body.prompt = $('#prompt').value;
+  send(body, {clear: true, keepText: false});
+}
+
+async function play() {
+  if (playing) return playing = false, sync();
+  playing = true;
+  sync();
+  while (playing && S.slots.some(s => s.masked)) {
+    await send({op: 'auto', args: [k()]}, {clear: true, keepText: true});
+    await sleep(250);
+  }
+  playing = false;
+  sync();
+}
+
+function setState(st, {clear = true, keepText = false} = {}) {
+  const prev = S;
+  S = st;
+  freshStep = prev && st.step > prev.step ? st.step : null;
+  if (clear) staged.clear();
+  for (const pos of staged.keys()) if (pos >= st.slots.length) staged.delete(pos);
+  if (!keepText || $('#prompt').value === prev?.prompt) $('#prompt').value = st.prompt;
+  if (!keepText || $('#answer').value === answerBase) $('#answer').value = answerBase = st.answer;
+  $('#len').value = st.slots.length;
+  $('#topk').value = st.topk;
+  $('#live').checked = st.view === 'live';
+  showNotes(st.notes, st.notes.some(n => n.startsWith('ERROR')));
+  render();
+}
+
+function showNotes(notes, err = false) {
+  $('#notes').textContent = notes.join('  ·  ');
+  $('#notes').classList.toggle('err', err);
+}
+
+// ---- staging edits (nothing reaches the model until Apply)
+
+function stage(pos, id, how, text) {
+  const cur = S.slots[pos], old = staged.get(pos);
+  if (old?.id === id || cur.tok === id) staged.delete(pos);  // clicking again un-stages
+  else staged.set(pos, {id, how, text: text ?? cur.cands.find(c => c.id === id)?.text});
+  select(pos);
+  render();
+}
+
+async function stageId(pos, value) {
+  value = value.trim().toLowerCase();
+  if (value === 'm' || value === '[m]') return stage(pos, S.mask_id, 'x');
+  const id = Number(value);
+  if (!/^\d+$/.test(value) || id >= S.vocab) return showNotes([`position ${pos}: “${value}” is not a token id (0–${S.vocab - 1})`], true);
+  let text = S.slots[pos].cands.find(c => c.id === id)?.text;
+  if (text == null) text = await api(`/api/piece?id=${id}`).then(r => r.text, () => '?');
+  stage(pos, id, 'id', text);
+}
+
+function select(pos, scroll = false) {
+  if (!S) return;
+  selected = Math.max(0, Math.min(S.slots.length - 1, pos));
+  document.querySelectorAll('.card, .chip').forEach(el => el.classList.toggle(el.classList.contains('card') ? 'selected' : 'sel', +el.dataset.pos === selected));
+  if (scroll) document.querySelector(`.card[data-pos="${selected}"]`)?.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+}
+
+// ---- drawing
+
+function render() {
+  if (!S) return;
+  selected = Math.min(selected, S.slots.length - 1);
+  $('#title').textContent = S.title;
+  $('#strip').replaceChildren(...S.slots.map(chip));
+  $('#grid').replaceChildren(...S.slots.map(card));
+  freshStep = null;  // flash once, not on every re-render
+  sync();
+}
+
+const isFresh = s => !s.masked && s.step === freshStep;
+
+function chip(s, i) {
+  const st = staged.get(i);
+  const text = st ? (st.id === S.mask_id ? '[M]' : st.text ?? '?') : s.masked ? '[M]' : s.text;
+  const cls = ['chip', s.masked && !st && 'masked', st && 'staged', i === selected && 'sel', isFresh(s) && 'fresh'];
+  return h('button', {class: cls.filter(Boolean).join(' '), 'data-pos': i, title: `position ${i}`, onclick: () => select(i, true)},
+    (text || '∅').replace(/\n/g, '↵'));
+}
+
+function card(s, i) {
+  const st = staged.get(i);
+  const cls = ['card', st && 'staged', i === selected && 'selected', isFresh(s) && 'fresh'];
+  const status = s.masked
+    ? h('span', {class: 'badge', title: 'rank in the low-confidence unmasking order'}, `order ${s.order}`)
+    : h('span', {class: 'badge', title: 'committed at step, by'}, h('span', {class: 'ok'}, '✔ '), `s${s.step} ${s.how}${s.frozen ? '' : ' · live'}`);
+  return h('article', {class: cls.filter(Boolean).join(' '), 'data-pos': i,
+                       onclick: e => e.target.closest('button, input') || select(i)},
+    h('div', {class: 'head'}, h('span', {class: 'pos'}, `#${i}`),
+      st && h('span', {class: 'badge'}, h('span', {class: 'pen'}, '✎ '), 'staged'), status),
+    h('div', {class: 'tok'}, s.masked ? h('span', {class: 'maskt'}, '[M]') : tokenSpan(s.text), h('span', {class: 'tid'}, s.tok)),
+    st && h('div', {class: 'next'}, '→', st.id === S.mask_id ? h('span', {class: 'maskt'}, '[M]') : tokenSpan(st.text), h('span', {class: 'tid'}, st.id)),
+    h('div', {class: 'meter', title: s.masked ? 'probability of the top candidate' : 'probability of this token when it was committed'},
+      'conf', h('div', {class: 'track'}, h('div', {class: 'fill', style: `width:${((s.conf ?? 0) * 100).toFixed(1)}%`})),
+      h('span', {class: 'val'}, fmtP(s.conf))),
+    h('ol', {class: 'cands'}, s.cands.map((c, r) => h('li', {},
+      h('button', {class: ['cand', c.id === s.tok && 'cur', st?.id === c.id && 'stg'].filter(Boolean).join(' '),
+                   title: `rank ${r + 1} · id ${c.id} · p = ${c.p.toFixed(4)}`, onclick: () => stage(i, c.id, `pick#${r + 1}`)},
+        h('span', {class: 'rank'}, r + 1), tokenSpan(c.text), h('span', {class: 'cid'}, c.id), h('span', {class: 'cp'}, fmtP(c.p)),
+        h('span', {class: 'cbar', style: `width:calc((100% - 8px) * ${c.p.toFixed(4)})`}))))),
+    h('div', {class: 'foot'},
+      h('input', {placeholder: 'type a token id ↵', inputmode: 'numeric', onkeydown: e => e.key === 'Enter' && stageId(i, e.target.value)}),
+      !s.masked && h('button', {title: 're-mask this position (x)', onclick: () => stage(i, S.mask_id, 'x')}, '× mask')));
+}
+
+function sync() {  // enable/disable controls to match state
+  const locked = busy || playing || !S;
+  const textEdited = S && ($('#answer').value !== answerBase || $('#prompt').value !== S.prompt);
+  $('#apply').disabled = locked || (!staged.size && !textEdited);
+  $('#nstaged').textContent = staged.size ? `· ${staged.size} staged` : textEdited ? '· text edited' : '';
+  $('#clear').disabled = locked || !staged.size;
+  for (const id of ['#auto', '#reset', '#len', '#topk', '#live']) $(id).disabled = locked;
+  $('#undo').disabled = locked || !S.can_undo;
+  $('#play').disabled = !S || (!playing && (busy || !S.slots.some(s => s.masked)));
+  $('#play').replaceChildren(playing ? '❚❚ Pause' : '▶ Play', h('kbd', {}, 'p'));
+  if (S) {
+    const done = S.slots.filter(s => !s.masked).length;
+    $('#stats').textContent = `step ${S.step} · ${done}/${S.slots.length} unmasked · prompt ${S.prompt_tokens} tokens · ` +
+      (busy ? 'running the model…' : `forward ${S.fwd_secs.toFixed(2)} s`);
+  }
+}
+
+// ---- wiring
+
+$('#apply').onclick = applyStep;
+$('#clear').onclick = () => { staged.clear(); render(); };
+$('#auto').onclick = () => command('auto', k());
+$('#play').onclick = play;
+$('#undo').onclick = () => command('undo');
+$('#reset').onclick = () => command('reset');
+$('#len').onchange = e => command('len', parseInt(e.target.value) || S.slots.length);
+$('#topk').onchange = e => command('topk', parseInt(e.target.value) || S.topk);
+$('#live').onchange = e => command('view', e.target.checked ? 'live' : 'frozen');
+$('#prompt').oninput = $('#answer').oninput = sync;
+
+document.addEventListener('keydown', e => {
+  const typing = e.target.matches('input, textarea');
+  if (e.key === 'Escape') {
+    if (typing) e.target.blur(); else { staged.clear(); render(); }
+    return;
+  }
+  if (typing) {
+    if (e.key === 'Enter' && (e.target.id === 'answer' || (e.target.id === 'prompt' && (e.metaKey || e.ctrlKey)))) {
+      e.preventDefault();
+      applyStep();
+    }
+    return;
+  }
+  if (!S || e.metaKey || e.ctrlKey || e.altKey || (e.target.matches('button') && [' ', 'Enter'].includes(e.key))) return;
+  const s = S.slots[selected];
+  const keys = {
+    Enter: applyStep, a: () => busy || playing || command('auto', k()), p: play, u: () => busy || playing || command('undo'),
+    ArrowRight: () => select(selected + 1, true), ArrowLeft: () => select(selected - 1, true),
+    l: () => select(selected + 1, true), h: () => select(selected - 1, true),
+    x: () => s.masked || stage(selected, S.mask_id, 'x'),
+  };
+  if (/^[0-9]$/.test(e.key)) {
+    const r = e.key === '0' ? 10 : +e.key, c = s.cands[r - 1];
+    keys[e.key] = () => c && stage(selected, c.id, `pick#${r}`);
+  }
+  if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
+});
+
+api('/api/state').then(st => setState(st), e => showNotes([`cannot reach the server (${e.message})`], true));
+</script>
+</body>
+</html>
