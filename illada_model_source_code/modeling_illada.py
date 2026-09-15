@@ -68,7 +68,7 @@ class ILLaDARotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
-    def forward(self, x, position_ids):
+    def forward(self, x, position_ids): # has nothing to do with value of x, only need its device and dtype, hence torch.no_grad
         inv_freq = self.inv_freq[None, :, None].to(device=x.device)
         position_ids = position_ids[:, None, :].to(dtype=torch.float32, device=x.device)
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
@@ -373,7 +373,7 @@ class ILLaDAModel(ILLaDAPreTrainedModel):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids or inputs_embeds")
 
-        if input_ids is not None and input_ids.dim() == 1:
+        if input_ids is not None and input_ids.dim() == 1: # allow both [B, T] and [T] input type
             input_ids = input_ids.unsqueeze(0)
 
         if inputs_embeds is None:
